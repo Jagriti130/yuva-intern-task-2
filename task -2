@@ -1,0 +1,375 @@
+"""
+eda_titanic.py
+Week 2 - Exploratory Data Analysis and Visualization
+Dataset : Titanic passenger data (Kaggle train.csv, 891 rows, 12 columns)
+Input   : raw/train.csv
+Outputs : figures/*.png, tables/*.csv, console summary
+Libraries: pandas, numpy, matplotlib, seaborn, scipy
+"""
+
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from scipy import stats
+
+# ----------------------------------------------------------------------
+# 0. Configuration
+# ----------------------------------------------------------------------
+DATA_PATH = Path("raw/train.csv")
+FIG_DIR = Path("figures")
+TAB_DIR = Path("tables")
+FIG_DIR.mkdir(exist_ok=True)
+TAB_DIR.mkdir(exist_ok=True)
+
+sns.set_theme(style="whitegrid", context="talk", palette="deep")
+plt.rcParams["figure.dpi"] = 110
+SAVE_KW = dict(dpi=150, bbox_inches="tight")
+
+SURVIVAL_LABELS = {0: "Did not survive", 1: "Survived"}
+
+
+def save(fig, name):
+    """Save a figure to figures/ and close it to free memory."""
+    path = FIG_DIR / f"{name}.png"
+    fig.savefig(path, **SAVE_KW)
+    plt.close(fig)
+    print(f"  saved -> {path}")
+
+
+def section(title):
+    print("\n" + "=" * 72)
+    print(title)
+    print("=" * 72)
+
+
+# ----------------------------------------------------------------------
+# 1. Load and prepare for analysis
+# ----------------------------------------------------------------------
+section("1. LOAD DATA")
+df = pd.read_csv(DATA_PATH)
+print("Shape:", df.shape)
+
+# Light preparation needed only for EDA (full cleaning is in the Week 1 pipeline)
+df["Sex"] = df["Sex"].str.capitalize()
+df["Title"] = df["Name"].str.extract(r",\s*([^\.]+)\.", expand=False).str.strip()
+df["Title"] = df["Title"].replace({"Mlle": "Miss", "Ms": "Miss", "Mme": "Mrs"})
+rare = ["Capt", "Col", "Countess", "Don", "Dona", "Dr", "Jonkheer",
+        "Lady", "Major", "Rev", "Sir"]
+df["Title"] = df["Title"].where(~df["Title"].isin(rare), "Rare")
+df["FamilySize"] = df["SibSp"] + df["Parch"] + 1
+df["IsAlone"] = (df["FamilySize"] == 1).map({True: "Alone", False: "With family"})
+df["Deck"] = df["Cabin"].str[0].fillna("Unknown")
+df["SurvivedLabel"] = df["Survived"].map(SURVIVAL_LABELS)
+df["Pclass_label"] = df["Pclass"].map({1: "1st", 2: "2nd", 3: "3rd"})
+df["AgeGroup"] = pd.cut(
+    df["Age"], bins=[0, 12, 18, 35, 60, 100],
+    labels=["Child (0-12)", "Teen (13-18)", "Young adult (19-35)",
+            "Adult (36-60)", "Senior (60+)"], right=True,
+)
+
+# ----------------------------------------------------------------------
+# 2. Initial analysis: structure, types, basic statistics, missingness
+# ----------------------------------------------------------------------
+section("2. INITIAL ANALYSIS")
+print(df.dtypes)
+print("\nFirst rows:\n", df.head())
+
+numeric_cols = ["Age", "SibSp", "Parch", "Fare", "FamilySize"]
+desc = df[numeric_cols].describe().T
+desc["skew"] = df[numeric_cols].skew()
+desc["missing"] = df[numeric_cols].isna().sum()
+print("\nDescriptive statistics:\n", desc.round(2))
+desc.round(3).to_csv(TAB_DIR / "numeric_summary.csv")
+
+cat_cols = ["Survived", "Pclass", "Sex", "Embarked", "Title", "Deck"]
+for c in cat_cols:
+    print(f"\n{c} value counts:\n", df[c].value_counts(dropna=False))
+
+missing = df.isna().sum()
+missing = missing[missing > 0].sort_values(ascending=False)
+missing_pct = (missing / len(df) * 100).round(1)
+print("\nMissing values:\n", pd.DataFrame({"count": missing, "pct": missing_pct}))
+
+overall_survival = df["Survived"].mean()
+print(f"\nOverall survival rate: {overall_survival:.1%}")
+
+# Figure 1: missingness bar chart
+fig, ax = plt.subplots(figsize=(9, 4.5))
+bars = ax.barh(missing.index, missing_pct.values, color=sns.color_palette("deep")[3])
+ax.bar_label(bars, fmt="%.1f%%", padding=4)
+ax.set_title("Percentage of Missing Values by Column")
+ax.set_xlabel("Missing (%)")
+ax.set_ylabel("Column")
+ax.set_xlim(0, missing_pct.max() * 1.15)
+save(fig, "01_missing_values")
+
+# ----------------------------------------------------------------------
+# 3. Univariate analysis
+# ----------------------------------------------------------------------
+section("3. UNIVARIATE ANALYSIS")
+
+# Figure 2: target distribution
+fig, ax = plt.subplots(figsize=(7, 5))
+sns.countplot(data=df, x="SurvivedLabel", hue="SurvivedLabel",
+              order=SURVIVAL_LABELS.values(), legend=False, ax=ax)
+for container in ax.containers:
+    ax.bar_label(container, padding=3)
+ax.set_title("Distribution of the Survival Outcome")
+ax.set_xlabel("Outcome")
+ax.set_ylabel("Number of passengers")
+save(fig, "02_survival_distribution")
+
+# Figure 3: passenger class and sex composition side by side
+fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+sns.countplot(data=df, x="Pclass_label", hue="Pclass_label",
+              order=["1st", "2nd", "3rd"], legend=False, ax=axes[0])
+axes[0].set_title("Passengers by Ticket Class")
+axes[0].set_xlabel("Ticket class")
+axes[0].set_ylabel("Count")
+for c in axes[0].containers:
+    axes[0].bar_label(c, padding=3)
+
+sns.countplot(data=df, x="Sex", hue="Sex", legend=False, ax=axes[1])
+axes[1].set_title("Passengers by Sex")
+axes[1].set_xlabel("Sex")
+axes[1].set_ylabel("Count")
+for c in axes[1].containers:
+    axes[1].bar_label(c, padding=3)
+fig.suptitle("Composition of the Passenger Population", y=1.02, fontsize=18)
+save(fig, "03_class_and_sex_composition")
+
+# Figure 4: age distribution with KDE overlay and mean/median markers
+age = df["Age"].dropna()
+fig, ax = plt.subplots(figsize=(10, 5.5))
+sns.histplot(age, bins=30, kde=True, color="steelblue", ax=ax)
+ax.axvline(age.mean(), color="crimson", ls="--", lw=2, label=f"Mean = {age.mean():.1f}")
+ax.axvline(age.median(), color="darkgreen", ls=":", lw=2, label=f"Median = {age.median():.1f}")
+ax.set_title("Age Distribution of Passengers (observed values only)")
+ax.set_xlabel("Age (years)")
+ax.set_ylabel("Frequency")
+ax.legend(title="Summary statistic")
+save(fig, "04_age_distribution")
+
+# Figure 5: fare distribution on raw and log scales (heavy right skew)
+fig, axes = plt.subplots(1, 2, figsize=(13, 5))
+sns.histplot(df["Fare"], bins=50, color="darkorange", ax=axes[0])
+axes[0].set_title("Fare (raw scale)")
+axes[0].set_xlabel("Fare (£)")
+axes[0].set_ylabel("Frequency")
+
+sns.histplot(np.log1p(df["Fare"]), bins=40, color="darkorange", ax=axes[1])
+axes[1].set_title("Fare (log(1 + x) scale)")
+axes[1].set_xlabel("log(1 + Fare)")
+axes[1].set_ylabel("Frequency")
+fig.suptitle("Fare Distribution: Strong Right Skew", y=1.02, fontsize=18)
+save(fig, "05_fare_distribution")
+
+# ----------------------------------------------------------------------
+# 4. Bivariate analysis: relationships with survival
+# ----------------------------------------------------------------------
+section("4. BIVARIATE ANALYSIS: SURVIVAL RATES")
+
+
+def survival_rate(by):
+    """Survival rate and group size for a categorical column."""
+    out = (df.groupby(by, observed=True)["Survived"]
+             .agg(survival_rate="mean", passengers="size")
+             .reset_index())
+    out["survival_rate"] = out["survival_rate"].round(3)
+    return out
+
+
+rate_sex = survival_rate("Sex")
+rate_class = survival_rate("Pclass_label")
+rate_embark = survival_rate("Embarked")
+rate_family = survival_rate("IsAlone")
+for name, t in [("sex", rate_sex), ("class", rate_class),
+                ("embarked", rate_embark), ("family", rate_family)]:
+    print(f"\nSurvival rate by {name}:\n", t)
+    t.to_csv(TAB_DIR / f"survival_by_{name}.csv", index=False)
+
+# Figure 6: survival rate by sex and class (grouped bars with annotations)
+fig, ax = plt.subplots(figsize=(10, 6))
+sns.barplot(data=df, x="Pclass_label", y="Survived", hue="Sex",
+            order=["1st", "2nd", "3rd"], errorbar=("ci", 95),
+            palette={"Female": "#d62728", "Male": "#1f77b4"}, ax=ax)
+ax.axhline(overall_survival, color="grey", ls="--", label=f"Overall = {overall_survival:.0%}")
+ax.set_title("Survival Rate by Ticket Class and Sex (95% CI)")
+ax.set_xlabel("Ticket class")
+ax.set_ylabel("Survival rate")
+ax.set_ylim(0, 1)
+ax.yaxis.set_major_formatter(plt.matplotlib.ticker.PercentFormatter(1.0))
+ax.legend(title="Sex", loc="upper right")
+save(fig, "06_survival_by_class_and_sex")
+
+# Figure 7: heatmap of survival rate across class and sex, with counts
+pivot_rate = df.pivot_table(index="Sex", columns="Pclass_label",
+                            values="Survived", aggfunc="mean")
+pivot_rate = pivot_rate[["1st", "2nd", "3rd"]]
+pivot_n = df.pivot_table(index="Sex", columns="Pclass_label",
+                         values="Survived", aggfunc="size")[["1st", "2nd", "3rd"]]
+annot = pivot_rate.map(lambda v: f"{v:.0%}") + "\n(n=" + pivot_n.astype(str) + ")"
+fig, ax = plt.subplots(figsize=(8, 4.5))
+sns.heatmap(pivot_rate, annot=annot, fmt="", cmap="RdYlGn", vmin=0, vmax=1,
+            cbar_kws={"label": "Survival rate"}, linewidths=1, ax=ax)
+ax.set_title("Survival Rate Heatmap: Sex x Ticket Class")
+ax.set_xlabel("Ticket class")
+ax.set_ylabel("Sex")
+save(fig, "07_survival_heatmap_sex_class")
+
+# Figure 8: age distribution by survival outcome
+fig, ax = plt.subplots(figsize=(10, 5.5))
+sns.kdeplot(data=df, x="Age", hue="SurvivedLabel", fill=True, common_norm=False,
+            alpha=0.4, linewidth=2, palette={"Did not survive": "grey",
+                                             "Survived": "seagreen"}, ax=ax)
+ax.set_title("Age Density by Survival Outcome")
+ax.set_xlabel("Age (years)")
+ax.set_ylabel("Density")
+save(fig, "08_age_density_by_survival")
+
+# Figure 9: survival rate by age group
+age_rate = (df.dropna(subset=["AgeGroup"])
+              .groupby("AgeGroup", observed=True)["Survived"]
+              .agg(survival_rate="mean", passengers="size").reset_index())
+age_rate.to_csv(TAB_DIR / "survival_by_age_group.csv", index=False)
+print("\nSurvival by age group:\n", age_rate.round(3))
+
+fig, ax = plt.subplots(figsize=(10, 5.5))
+bars = ax.bar(age_rate["AgeGroup"].astype(str), age_rate["survival_rate"],
+              color=sns.color_palette("viridis", len(age_rate)))
+ax.bar_label(bars, labels=[f"{r:.0%}\n(n={n})" for r, n in
+                           zip(age_rate["survival_rate"], age_rate["passengers"])],
+             padding=3)
+ax.axhline(overall_survival, color="grey", ls="--", label=f"Overall = {overall_survival:.0%}")
+ax.set_ylim(0, 1)
+ax.yaxis.set_major_formatter(plt.matplotlib.ticker.PercentFormatter(1.0))
+ax.set_title("Survival Rate by Age Group")
+ax.set_xlabel("Age group")
+ax.set_ylabel("Survival rate")
+ax.legend()
+plt.setp(ax.get_xticklabels(), rotation=15, ha="right")
+save(fig, "09_survival_by_age_group")
+
+# ----------------------------------------------------------------------
+# 5. Correlations and multivariate relationships
+# ----------------------------------------------------------------------
+section("5. CORRELATIONS")
+corr_cols = ["Survived", "Pclass", "Age", "SibSp", "Parch", "Fare", "FamilySize"]
+corr = df[corr_cols].corr(method="spearman")   # robust to skew and outliers
+print("Spearman correlation matrix:\n", corr.round(2))
+corr.round(3).to_csv(TAB_DIR / "spearman_correlation.csv")
+
+# Figure 10: correlation heatmap with masked upper triangle
+mask = np.triu(np.ones_like(corr, dtype=bool))
+fig, ax = plt.subplots(figsize=(9, 7))
+sns.heatmap(corr, mask=mask, annot=True, fmt=".2f", cmap="coolwarm",
+            vmin=-1, vmax=1, square=True, linewidths=0.5,
+            cbar_kws={"label": "Spearman correlation (ρ)"}, ax=ax)
+ax.set_title("Spearman Correlation Between Numeric Features")
+save(fig, "10_correlation_heatmap")
+
+# Figure 11: Fare vs Age scatter, coloured by survival, sized by family size
+fig, ax = plt.subplots(figsize=(10, 6.5))
+sns.scatterplot(data=df.dropna(subset=["Age"]), x="Age", y="Fare",
+                hue="SurvivedLabel", style="Pclass_label", size="FamilySize",
+                sizes=(40, 300), alpha=0.75,
+                palette={"Did not survive": "grey", "Survived": "seagreen"}, ax=ax)
+ax.set_yscale("log")
+ax.set_title("Fare vs Age, Coloured by Survival and Shaped by Class")
+ax.set_xlabel("Age (years)")
+ax.set_ylabel("Fare (£, log scale)")
+ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=10)
+save(fig, "11_fare_vs_age_scatter")
+
+# Figure 12: Fare by class (box + strip) to inspect outliers
+fig, ax = plt.subplots(figsize=(10, 6))
+sns.boxplot(data=df, x="Pclass_label", y="Fare", order=["1st", "2nd", "3rd"],
+            hue="Pclass_label", palette="Set2", legend=False, showfliers=False, ax=ax)
+sns.stripplot(data=df, x="Pclass_label", y="Fare", order=["1st", "2nd", "3rd"],
+              color="black", alpha=0.35, size=3, ax=ax)
+ax.set_yscale("log")
+ax.set_title("Fare Distribution by Ticket Class (log scale)")
+ax.set_xlabel("Ticket class")
+ax.set_ylabel("Fare (£, log scale)")
+save(fig, "12_fare_by_class_box_strip")
+
+# ----------------------------------------------------------------------
+# 6. Anomaly and outlier detection
+# ----------------------------------------------------------------------
+section("6. ANOMALIES AND OUTLIERS")
+
+
+def iqr_flags(s, k=1.5):
+    q1, q3 = s.quantile([0.25, 0.75])
+    iqr = q3 - q1
+    lo, hi = q1 - k * iqr, q3 + k * iqr
+    return (s < lo) | (s > hi), lo, hi
+
+
+fare_flag, f_lo, f_hi = iqr_flags(df["Fare"].dropna())
+age_flag, a_lo, a_hi = iqr_flags(df["Age"].dropna())
+print(f"Fare IQR bounds: [{f_lo:.2f}, {f_hi:.2f}], flagged {fare_flag.sum()}")
+print(f"Age  IQR bounds: [{a_lo:.2f}, {a_hi:.2f}], flagged {age_flag.sum()}")
+
+fare_outliers = df.loc[fare_flag.reindex(df.index, fill_value=False)]
+print("\nFare outliers by class:\n", fare_outliers["Pclass_label"].value_counts())
+print("\nZero-fare passengers:", (df["Fare"] == 0).sum())
+print("\nTop 5 fares:\n",
+      df.nlargest(5, "Fare")[["PassengerId", "Pclass", "Fare", "Cabin", "Survived"]])
+
+# Figure 13: anomaly summary - count of IQR outliers per class
+out_by_class = (fare_outliers["Pclass_label"].value_counts()
+                .reindex(["1st", "2nd", "3rd"], fill_value=0))
+fig, ax = plt.subplots(figsize=(8, 5))
+bars = ax.bar(out_by_class.index, out_by_class.values, color=["#4c72b0", "#dd8452", "#55a868"])
+ax.bar_label(bars, padding=3)
+ax.set_title("IQR Fare Outliers by Ticket Class")
+ax.set_xlabel("Ticket class")
+ax.set_ylabel("Number of flagged passengers")
+save(fig, "13_fare_outliers_by_class")
+
+# ----------------------------------------------------------------------
+# 7. Aggregations and transformations used in the analysis
+# ----------------------------------------------------------------------
+section("7. AGGREGATIONS")
+agg_table = (df.groupby(["Pclass_label", "Sex"], observed=True)
+               .agg(passengers=("PassengerId", "size"),
+                    survivors=("Survived", "sum"),
+                    survival_rate=("Survived", "mean"),
+                    median_fare=("Fare", "median"),
+                    mean_age=("Age", "mean"))
+               .round(3).reset_index())
+print(agg_table)
+agg_table.to_csv(TAB_DIR / "aggregate_class_sex.csv", index=False)
+
+# ----------------------------------------------------------------------
+# 8. Statistical checks on the visual patterns
+# ----------------------------------------------------------------------
+section("8. STATISTICAL CHECKS")
+ct_sex = pd.crosstab(df["Sex"], df["Survived"])
+chi2, p, dof, _ = stats.chi2_contingency(ct_sex)
+print(f"Sex vs survival: chi2={chi2:.2f}, dof={dof}, p={p:.2e}")
+
+ct_class = pd.crosstab(df["Pclass"], df["Survived"])
+chi2, p, dof, _ = stats.chi2_contingency(ct_class)
+print(f"Class vs survival: chi2={chi2:.2f}, dof={dof}, p={p:.2e}")
+
+fare_surv = df.loc[df["Survived"] == 1, "Fare"].dropna()
+fare_dead = df.loc[df["Survived"] == 0, "Fare"].dropna()
+u, p = stats.mannwhitneyu(fare_surv, fare_dead, alternative="two-sided")
+print(f"Fare, survivors vs non-survivors (Mann-Whitney U): U={u:.0f}, p={p:.2e}")
+
+# ----------------------------------------------------------------------
+# 9. Key findings (printed so they can be pasted into the report)
+# ----------------------------------------------------------------------
+section("9. KEY FINDINGS")
+print(f"- Overall survival rate: {overall_survival:.1%}")
+print("- Survival by sex:\n", rate_sex.to_string(index=False))
+print("- Survival by class:\n", rate_class.to_string(index=False))
+print("- Survival by age group:\n", age_rate.to_string(index=False))
+print(f"- Spearman rho(Fare, Pclass) = {corr.loc['Fare', 'Pclass']:.2f}")
+print(f"- Spearman rho(Survived, Fare) = {corr.loc['Survived', 'Fare']:.2f}")
+print(f"\nFigures written: {len(list(FIG_DIR.glob('*.png')))}")
+print("Tables written:", sorted(p.name for p in TAB_DIR.glob('*.csv')))
